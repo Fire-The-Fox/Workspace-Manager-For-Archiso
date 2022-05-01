@@ -24,36 +24,14 @@
 #include <ctype.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <pwd.h>
 
 #include "FoxString.h"
-
-/*
-iso_name="NAME"
-iso_label="NAME"
-iso_publisher="PUBLISHER"
-iso_application="DESCRIPTION"
-iso_version="VERSION"
-install_dir="arch"
-buildmodes=('iso')
-bootmodes=('bios.syslinux.mbr' 'bios.syslinux.eltorito' 'uefi-x64.systemd-boot.esp' 'uefi-x64.systemd-boot.eltorito')
-arch="x86_64"
-pacman_conf="pacman.conf"
-airootfs_image_type="squashfs"
-airootfs_image_tool_options=('-comp' 'xz' '-Xbcj' 'x86' '-b' '1M' '-Xdict-size' '1M')
-
-airootfs_image_type="erofs"
-airootfs_image_tool_options=('-zlz4hc,12')
-file_permissions=(
-  ["/etc/shadow"]="0:0:400"
-  ["/root"]="0:0:750"
-  ["/root/.automated_script.sh"]="0:0:755"
-  ["/usr/local/bin/choose-mirror"]="0:0:755"
-  ["/usr/local/bin/Installation_guide"]="0:0:755"
-  ["/usr/local/bin/livecd-sound"]="0:0:755"
-)
- */
+#include "toml.h"
 
 FoxString *projectInfo();
+void build();
+void clean();
 
 int main(int argc, char **args) {
 
@@ -133,6 +111,19 @@ int main(int argc, char **args) {
             FoxString_Connect(&temp, FoxString_New("\"\n"));
             FoxString_Connect(WToml, temp);
 
+            temp = FoxString_ReCreate(&temp, "User = \"");
+
+            char *username = malloc(32);
+
+            getlogin_r(username, 32);
+
+            if (username) {
+                FoxString_Connect(&temp, FoxString_New(username));
+                FoxString_Connect(&temp, FoxString_New("\""));
+                FoxString_Connect(WToml, temp);
+                free(username);
+            }
+
             FoxString here = FoxString_New(getenv("PWD"));
 
             FoxString_Connect(&here, FoxString_New("/"));
@@ -161,13 +152,38 @@ int main(int argc, char **args) {
             if (config != NULL) {
                 fwrite(WToml->data, 1, WToml->size, config);
                 fclose(config);
+
+                system("sed -i '/iso_name=.*/c\\source ./build-source.sh' ./profiledef.sh");
+                system("sed -i '/iso_label/d' ./profiledef.sh");
+                system("sed -i '/iso_publisher/d' ./profiledef.sh");
+                system("sed -i '/iso_application/d' ./profiledef.sh");
+                system("sed -i '/iso_version/d' ./profiledef.sh");
+
+                system("sed -i '/airootfs_image_type/d' ./profiledef.sh");
+                system("sed -i '/airootfs_image_tool_options/d' ./profiledef.sh");
+
             } else {
                 printf("ERROR: Can't create config file");
             }
 
+            FoxString_Connect(&here, FoxString_New("/iso/"));
+
+            mkdir(here.data, 0751);
+
             for (int j = 0; j < 6; j++) {
                 FoxString_Clean(&newProjectData[j]);
             }
+
+        } else if (!strcmp(args[i], "--project-dir")) {
+            chdir(args[i + 1]);
+        } else if (!strcmp(args[i], "--build")) {
+
+            build();
+
+        } else if (!strcmp(args[i], "--clean")) {
+
+            clean();
+
         }
     }
 
@@ -182,10 +198,17 @@ FoxString *projectInfo() {
     printf("Please select profile of your iso: \nreleng - used for monthly iso release\n"
            "baseline - iso where are only required components to boot\nPlease select: ");
 
-    data[0] = FoxStringInput();
-    for (int i = 0; i < data[0].size; i++) {
-        data[0].data[i] = (char) tolower(data[0].data[i]);
-    }
+    do {
+        data[0] = FoxStringInput();
+        for (int i = 0; i < data[0].size; i++) {
+            data[0].data[i] = (char) tolower(data[0].data[i]);
+        }
+        if (FoxString_Contains(data[0], FoxString_New("releng")) != EQUAL &&
+            FoxString_Contains(data[0], FoxString_New("baseline")) != EQUAL) {
+            printf("Profile '%s' was not found!\nPlease select: ", data[0].data);
+        }
+    } while(FoxString_Contains(data[0], FoxString_New("releng")) != EQUAL &&
+            FoxString_Contains(data[0], FoxString_New("baseline")) != EQUAL);
 
     printf("\nPlease type name of your iso: ");
 
@@ -213,4 +236,144 @@ FoxString *projectInfo() {
     }
 
     return data;
+}
+
+void build() {
+
+    printf("Executing build\n");
+
+    if (geteuid() != 0) {
+        fprintf(stderr, "Please run this app as root: %s\n", strerror(EACCES));
+        exit(1);
+    }
+
+    FILE *config;
+    char errBuf[200];
+
+    config = fopen("workspace-config.toml", "r");
+
+    if (!config) {
+        fprintf(stderr, "Can't open workspace-config.toml: %s", strerror(errno));
+        exit(1);
+    }
+
+    toml_table_t const *conf = toml_parse_file(config, errBuf, sizeof(errBuf));
+
+    if (!conf) {
+        fprintf(stderr, "Can't parse workspace-config.toml: %s\n", errBuf);
+        exit(1);
+    }
+
+    toml_table_t const *isoInfo = toml_table_in(conf, "iso-info");
+
+    if (!isoInfo) {
+        fprintf(stderr, "[iso-info] wasn't found in config file\n");
+        exit(1);
+    }
+
+    toml_table_t const *workspaceSettings = toml_table_in(conf, "workspace-settings");
+
+    if (!workspaceSettings) {
+        fprintf(stderr, "[workspace-settings] wasn't found in config file\n");
+        exit(1);
+    }
+
+    toml_datum_t isoInfoArr[] = {toml_string_in(isoInfo, "Name"),
+                                 toml_string_in(isoInfo, "Description"),
+                                 toml_string_in(isoInfo, "Publisher"),
+                                 toml_string_in(isoInfo, "Version")};
+
+    for (int j = 0; j < 4; j++) {
+        if(!isoInfoArr[j].u.s) {
+            fprintf(stderr, "Name, Description, Publisher of Version is missing in your config file\n");
+            exit(1);
+        }
+    }
+
+    toml_datum_t compressionType = toml_string_in(workspaceSettings, "Compression");
+    toml_datum_t defaultOwner = toml_string_in(workspaceSettings, "User");
+
+    if (!compressionType.u.s) {
+        fprintf(stderr, "Compression is missing in your config file\n");
+        exit(1);
+    }
+
+    if (!defaultOwner.u.s) {
+        fprintf(stderr, "User is missing in your config file\n");
+        exit(1);
+    }
+
+    FoxString data = FoxString_New("iso_name");
+    FoxString_Connect(&data, FoxString_New("=\""));
+    FoxString_Connect(&data, FoxString_New(isoInfoArr[0].u.s));
+    FoxString_Connect(&data, FoxString_New("\"\n"));
+
+    FoxString_Connect(&data, FoxString_New("iso_label=\""));
+    FoxString_Connect(&data, FoxString_New(isoInfoArr[0].u.s));
+    FoxString_Connect(&data, FoxString_New("\"\n"));
+
+    FoxString_Connect(&data, FoxString_New("iso_publisher=\""));
+    FoxString_Connect(&data, FoxString_New(isoInfoArr[2].u.s));
+    FoxString_Connect(&data, FoxString_New("\"\n"));
+
+    FoxString_Connect(&data, FoxString_New("iso_application=\""));
+    FoxString_Connect(&data, FoxString_New(isoInfoArr[1].u.s));
+    FoxString_Connect(&data, FoxString_New("\"\n"));
+
+    FoxString_Connect(&data, FoxString_New("iso_version=\""));
+    FoxString_Connect(&data, FoxString_New(isoInfoArr[3].u.s));
+    FoxString_Connect(&data, FoxString_New("\"\n"));
+
+    if (!strcmp(compressionType.u.s, "erofs")) {
+        FoxString_Connect(&data, FoxString_New("airootfs_image_type=\"erofs\"\n"));
+        FoxString_Connect(&data,
+                          FoxString_New("airootfs_image_tool_options=('-zlz4hc,12')\n")
+                          );
+    } else if (!strcmp(compressionType.u.s, "squashfs")) {
+        FoxString_Connect(&data, FoxString_New("airootfs_image_type=\"squashfs\"\n"));
+        FoxString_Connect(&data,
+                          FoxString_New("airootfs_image_tool_options=('-comp' 'xz' '-Xbcj' 'x86' '-b' '1M' '-Xdict-size' '1M')")
+                          );
+    }
+
+    FILE *source;
+
+    source = fopen("build-source.sh", "w");
+
+    if(source != NULL) {
+        fwrite(data.data, 1, data.size, source);
+        fclose(source);
+    }
+
+    FoxString cmd = FoxString_New("chown ");
+    FoxString_Connect(&cmd, FoxString_New(defaultOwner.u.s));
+    FoxString cmd1 = FoxString_New(cmd.data);
+    FoxString cmd2 = FoxString_New(cmd.data);
+    FoxString_Connect(&cmd1, FoxString_New(" *.iso"));
+    FoxString_Connect(&cmd2, FoxString_New(" build-source.sh"));
+
+    system("mkarchiso -v -w ./ -o ./iso ./");
+    system("cp -f iso/*.iso ./");
+    system(cmd1.data);
+    system(cmd2.data);
+
+    fclose(config);
+}
+
+void clean() {
+    printf("Executing clean\n");
+
+    if (geteuid() != 0) {
+        fprintf(stderr, "Please run this app as root: %s\n", strerror(EACCES));
+        exit(1);
+    }
+
+    system("rm -rf x86_64/");
+    system("rm -rf iso*");
+    system("rm -rf base.*");
+    system("rm -rf build.*");
+    system("rm -rf build_date");
+    system("rm -rf efiboot.img");
+
+    printf("Cleaning is done!\n");
 }
