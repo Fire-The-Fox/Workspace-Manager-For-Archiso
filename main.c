@@ -22,6 +22,8 @@
 #include <string.h>
 #include <errno.h>
 #include <ctype.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include "FoxString.h"
 
@@ -131,7 +133,37 @@ int main(int argc, char **args) {
             FoxString_Connect(&temp, FoxString_New("\"\n"));
             FoxString_Connect(WToml, temp);
 
-            printf("\nConfig: \n%s", WToml->data);
+            FoxString here = FoxString_New(getenv("PWD"));
+
+            FoxString_Connect(&here, FoxString_New("/"));
+
+            FoxString_Connect(&here, newProjectData[1]);
+
+            mkdir(here.data, 0751);
+
+            chdir(here.data);
+
+            FoxString_Clean(&here);
+
+            FoxString cmd = FoxString_New("cp -r ");
+
+            FoxString_Connect(&cmd, pathStart);
+            FoxString_Connect(&cmd, newProjectData[0]);
+
+            FoxString_Connect(&cmd, FoxString_New("/* ./"));
+
+            system(cmd.data);
+
+            FILE *config;
+
+            config = fopen("workspace-config.toml", "w");
+
+            if (config != NULL) {
+                fwrite(WToml->data, 1, WToml->size, config);
+                fclose(config);
+            } else {
+                printf("ERROR: Can't create config file");
+            }
 
             for (int j = 0; j < 6; j++) {
                 FoxString_Clean(&newProjectData[j]);
